@@ -1,0 +1,14 @@
+{
+  "name": "hotreloader-demo",
+  "version": "1.0.0",
+  "description": "Demo application for Hot Reload Optimizer",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "watch": "../../hotreloader ."
+  },
+  "keywords": ["demo", "hot-reload", "optimizer"],
+  "author": "",
+  "license": "MIT"
+}

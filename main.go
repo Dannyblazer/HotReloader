@@ -2,10 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
-
 	"hotreloader/pkg/optimizer"
 	"hotreloader/pkg/watcher"
+	"os"
 )
 
 func main() {

@@ -132,7 +132,10 @@ func (g *GoPlugin) Detect() bool {
 func (g *GoPlugin) Build(files []string) error {
 	start := time.Now()
 
-	cmd := exec.Command("go", "build", "-o", "/tmp/output", g.modulePath)
+	// Build from the project directory
+	cmd := exec.Command("go", "build", "-o", "/tmp/hotreload_output", ".")
+	cmd.Dir = g.modulePath // Set working directory to project root
+
 	output, err := cmd.CombinedOutput()
 
 	g.lastBuildTime = time.Since(start)

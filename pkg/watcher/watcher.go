@@ -126,6 +126,7 @@ func (w *Watcher) Start() error {
 
 		case <-sigChan:
 			fmt.Println("\n\nShutting down...")
+			w.optimizer.Shutdown() // Stop running process
 			w.optimizer.PrintStats()
 			w.optimizer.GetDashboard().PrintSummary()
 			return nil

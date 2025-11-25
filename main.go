@@ -15,8 +15,14 @@ func main() {
 
 	dir := os.Args[1]
 
-	// Initialize the optimizer
-	opt := optimizer.NewOptimizer()
+	// Initialize the optimizer with project directory
+	opt := optimizer.NewOptimizer(dir)
+
+	// Perform initial build and start the application
+	if err := opt.InitialBuild(); err != nil {
+		fmt.Fprintf(os.Stderr, "Initial build failed: %v\n", err)
+		fmt.Println("Continuing to watch for changes...")
+	}
 
 	// Create file watcher
 	w, err := watcher.NewWatcher(dir, opt)

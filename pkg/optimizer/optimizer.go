@@ -2,22 +2,30 @@ package optimizer
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"sync"
 	"time"
 
 	"hotreloader/pkg/analyzer"
 	"hotreloader/pkg/cache"
 	"hotreloader/pkg/dashboard"
+	"hotreloader/pkg/plugin"
 )
 
 // Optimizer is the core hot reload optimizer
 type Optimizer struct {
-	cache     *cache.ModuleCache
-	analyzer  *analyzer.DependencyAnalyzer
-	depGraph  *analyzer.DependencyGraph
-	dashboard *dashboard.Dashboard
-	mu        sync.RWMutex
-	stats     *BuildStats
+	cache          *cache.ModuleCache
+	analyzer       *analyzer.DependencyAnalyzer
+	depGraph       *analyzer.DependencyGraph
+	dashboard      *dashboard.Dashboard
+	mu             sync.RWMutex
+	stats          *BuildStats
+	pluginMgr      *plugin.PluginManager
+	currentProcess *exec.Cmd
+	processMu      sync.Mutex
+	outputBinary   string
+	projectDir     string
 }
 
 // BuildStats tracks rebuild statistics
@@ -31,12 +39,31 @@ type BuildStats struct {
 }
 
 // NewOptimizer creates a new optimizer instance
-func NewOptimizer() *Optimizer {
+func NewOptimizer(projectDir string) *Optimizer {
+	// Initialize plugin manager
+	pluginMgr := plugin.NewPluginManager()
+
+	// Register available plugins
+	pluginMgr.Register(plugin.NewGoPlugin(projectDir))
+	pluginMgr.Register(plugin.NewWebpackPlugin("webpack.config.js"))
+	pluginMgr.Register(plugin.NewVitePlugin("vite.config.js"))
+
+	// Try to detect and activate a plugin
+	if err := pluginMgr.DetectAndActivate(); err != nil {
+		fmt.Printf("Warning: No build plugin detected: %v\n", err)
+		fmt.Println("Hot reloader will run in analysis-only mode")
+	} else {
+		fmt.Printf("Detected build tool: %s\n", pluginMgr.GetActivePlugin().Name())
+	}
+
 	return &Optimizer{
-		cache:     cache.NewModuleCache(),
-		analyzer:  analyzer.NewDependencyAnalyzer(),
-		depGraph:  analyzer.NewDependencyGraph(),
-		dashboard: dashboard.NewDashboard(),
+		cache:        cache.NewModuleCache(),
+		analyzer:     analyzer.NewDependencyAnalyzer(),
+		depGraph:     analyzer.NewDependencyGraph(),
+		dashboard:    dashboard.NewDashboard(),
+		pluginMgr:    pluginMgr,
+		outputBinary: "/tmp/hotreload_output",
+		projectDir:   projectDir,
 		stats: &BuildStats{
 			ModuleRebuildTime: make(map[string]time.Duration),
 		},
@@ -82,19 +109,33 @@ func (o *Optimizer) ProcessFileChange(filePath string) error {
 	// Get all affected files (files that depend on this one)
 	affectedFiles := o.depGraph.GetAllAffectedFiles(filePath)
 
-	// Simulate rebuild and track time per module
+	// Invalidate cache for affected files
 	rebuildStart := time.Now()
 	for _, file := range affectedFiles {
-		moduleStart := time.Now()
-
-		// This is where actual rebuild would happen
-		// For now, we'll just invalidate the cache
 		o.cache.Invalidate(file)
+	}
 
-		moduleDuration := time.Since(moduleStart)
-		o.stats.mu.Lock()
-		o.stats.ModuleRebuildTime[file] = moduleDuration
-		o.stats.mu.Unlock()
+	// ACTUAL BUILD: Run the build plugin if available
+	if o.pluginMgr.GetActivePlugin() != nil {
+		fmt.Printf("\n🔨 Building (affected files: %d)...\n", len(affectedFiles))
+
+		buildStart := time.Now()
+		if err := o.pluginMgr.Build(affectedFiles); err != nil {
+			fmt.Printf("❌ Build failed: %v\n", err)
+			return fmt.Errorf("build failed: %w", err)
+		}
+		buildDuration := time.Since(buildStart)
+		fmt.Printf("✅ Build successful (took %v)\n", buildDuration)
+
+		// Only restart if using Go plugin (compiled binaries)
+		if o.pluginMgr.GetActivePlugin().Name() == "go" {
+			fmt.Println("🔄 Restarting application...")
+			if err := o.restartProcess(); err != nil {
+				fmt.Printf("⚠️  Failed to restart process: %v\n", err)
+			} else {
+				fmt.Println("✅ Application restarted successfully")
+			}
+		}
 	}
 
 	// Update cache for the changed file
@@ -172,4 +213,117 @@ func (o *Optimizer) AnalyzeProject(rootDir string) error {
 	// This would recursively analyze all files in the project
 	// and build the initial dependency graph
 	return nil
+}
+
+// InitialBuild performs the first build and starts the application
+func (o *Optimizer) InitialBuild() error {
+	if o.pluginMgr.GetActivePlugin() == nil {
+		fmt.Println("No build plugin available, skipping initial build")
+		return nil
+	}
+
+	fmt.Println("\n🔨 Performing initial build...")
+	buildStart := time.Now()
+
+	// Build the project
+	if err := o.pluginMgr.Build([]string{}); err != nil {
+		fmt.Printf("❌ Initial build failed: %v\n", err)
+		return fmt.Errorf("initial build failed: %w", err)
+	}
+
+	buildDuration := time.Since(buildStart)
+	fmt.Printf("✅ Initial build successful (took %v)\n", buildDuration)
+
+	// Start the process if it's a Go project
+	if o.pluginMgr.GetActivePlugin().Name() == "go" {
+		fmt.Println("▶️  Starting application...")
+		if err := o.restartProcess(); err != nil {
+			fmt.Printf("⚠️  Failed to start process: %v\n", err)
+			return fmt.Errorf("failed to start process: %w", err)
+		}
+		fmt.Println("✅ Application started successfully\n")
+	}
+
+	return nil
+}
+
+// restartProcess stops the current process and starts a new one
+func (o *Optimizer) restartProcess() error {
+	o.processMu.Lock()
+	defer o.processMu.Unlock()
+
+	// Kill old process if it exists
+	if o.currentProcess != nil && o.currentProcess.Process != nil {
+		fmt.Printf("Stopping old process (PID: %d)...\n", o.currentProcess.Process.Pid)
+
+		// Try graceful shutdown first
+		if err := o.currentProcess.Process.Signal(os.Interrupt); err == nil {
+			// Wait up to 2 seconds for graceful shutdown
+			done := make(chan error)
+			go func() {
+				done <- o.currentProcess.Wait()
+			}()
+
+			select {
+			case <-done:
+				fmt.Println("Process stopped gracefully")
+			case <-time.After(2 * time.Second):
+				// Force kill if graceful shutdown times out
+				fmt.Println("Graceful shutdown timed out, force killing...")
+				o.currentProcess.Process.Kill()
+				o.currentProcess.Wait()
+			}
+		} else {
+			// If interrupt fails, just kill it
+			o.currentProcess.Process.Kill()
+			o.currentProcess.Wait()
+		}
+	}
+
+	// Start new process
+	cmd := exec.Command(o.outputBinary)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = o.projectDir
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start process: %w", err)
+	}
+
+	o.currentProcess = cmd
+	fmt.Printf("✅ Started new process with PID: %d\n", cmd.Process.Pid)
+
+	return nil
+}
+
+// Shutdown gracefully stops the current running process
+func (o *Optimizer) Shutdown() {
+	o.processMu.Lock()
+	defer o.processMu.Unlock()
+
+	if o.currentProcess != nil && o.currentProcess.Process != nil {
+		fmt.Printf("\nStopping process (PID: %d)...\n", o.currentProcess.Process.Pid)
+
+		// Try graceful shutdown
+		if err := o.currentProcess.Process.Signal(os.Interrupt); err == nil {
+			done := make(chan error)
+			go func() {
+				done <- o.currentProcess.Wait()
+			}()
+
+			select {
+			case <-done:
+				fmt.Println("Process stopped gracefully")
+			case <-time.After(2 * time.Second):
+				fmt.Println("Force killing process...")
+				o.currentProcess.Process.Kill()
+				o.currentProcess.Wait()
+			}
+		} else {
+			o.currentProcess.Process.Kill()
+			o.currentProcess.Wait()
+		}
+
+		o.currentProcess = nil
+	}
 }

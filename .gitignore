@@ -25,7 +25,9 @@ go.work
 # OS
 .DS_Store
 Thumbs.db
-
+B*
+INT*
+watch-su*
 # Build outputs
 dist/
 build/

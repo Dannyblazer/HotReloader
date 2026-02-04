@@ -323,7 +323,7 @@ MIT License - see LICENSE file for details
 ## 🙏 Acknowledgments
 
 - [fsnotify](https://github.com/fsnotify/fsnotify) - Cross-platform file system notifications
-- Inspired by modern build tools like Vite and Turbopack
+- Inspired by modern build tools like Air and Turbopack
 
 ## 💬 Support
 
